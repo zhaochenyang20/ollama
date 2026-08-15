@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PORT="${1:-9000}"
-MODEL="${2:-qwen3.6:35b-a3b-mtp-q4_K_M}"
+MODEL="${2:-qwen3.8}"
 KEEP_ALIVE_HOURS="${3:-24}"
 STATUS_INTERVAL_SECONDS="${STATUS_INTERVAL_SECONDS:-60}"
 BACKEND_PORT="${OLLAMA_BACKEND_PORT:-$((PORT + 1))}"
