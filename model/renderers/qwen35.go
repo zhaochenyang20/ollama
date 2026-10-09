@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/types/model"
 )
 
 const (
@@ -126,34 +127,33 @@ func qwen38ReasoningInstructions(think *api.ThinkValue) (string, error) {
 		return qwen38LowReasoningInstructions, nil
 	case "medium":
 		return "", nil
-	case "high", "max":
+	case "xhigh":
 		return qwen38XHighReasoningInstructions, nil
 	default:
-		return "", fmt.Errorf("unsupported Qwen3.8 reasoning effort %q", think.String())
+		return qwen38XHighReasoningInstructions, nil
 	}
 }
 
-// Qwen3.8 has no developer role. Fold leading developer instructions into its
-// system turn so they retain precedence over user messages.
+// Qwen3.8 accepts exactly one leading system turn and has no developer role.
+// Fold instruction messages from the effective history into that turn while
+// preserving instruction order and the order of all conversation messages.
 func normalizeQwen38Messages(messages []api.Message) ([]api.Message, error) {
 	var instructionCount int
-	var hasDeveloper bool
 	var instructions []string
 	for _, message := range messages {
 		if message.Role != "system" && message.Role != "developer" {
-			break
+			continue
 		}
 		if len(message.Images) > 0 {
 			return nil, fmt.Errorf("%s message cannot contain images", message.Role)
 		}
 		instructionCount++
-		hasDeveloper = hasDeveloper || message.Role == "developer"
 		if content := strings.TrimSpace(message.Content); content != "" {
 			instructions = append(instructions, content)
 		}
 	}
 
-	if !hasDeveloper {
+	if instructionCount == 0 || (instructionCount == 1 && messages[0].Role == "system") {
 		return messages, nil
 	}
 
@@ -162,7 +162,11 @@ func normalizeQwen38Messages(messages []api.Message) ([]api.Message, error) {
 		Role:    "system",
 		Content: strings.Join(instructions, "\n\n"),
 	})
-	normalized = append(normalized, messages[instructionCount:]...)
+	for _, message := range messages {
+		if message.Role != "system" && message.Role != "developer" {
+			normalized = append(normalized, message)
+		}
+	}
 	return normalized, nil
 }
 
@@ -354,4 +358,11 @@ func (r *Qwen35Renderer) Render(messages []api.Message, tools []api.Tool, think 
 	}
 
 	return sb.String(), nil
+}
+
+func (r *Qwen35Renderer) Thinking() *model.Thinking {
+	if r.variant == qwen35Renderer38 {
+		return &model.Thinking{Values: []any{false, "low", "medium", "xhigh"}, Default: "xhigh"}
+	}
+	return &model.Thinking{Values: []any{false, true}, Default: r.isThinking}
 }
