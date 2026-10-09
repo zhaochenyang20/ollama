@@ -5,6 +5,7 @@ PORT="${1:-9000}"
 MODEL="${2:-qwen3.8}"
 KEEP_ALIVE_HOURS="${3:-24}"
 STATUS_INTERVAL_SECONDS="${STATUS_INTERVAL_SECONDS:-60}"
+NUM_BATCH="${OLLAMA_NUM_BATCH:-256}"
 BACKEND_PORT="${OLLAMA_BACKEND_PORT:-$((PORT + 1))}"
 HOST="127.0.0.1:${PORT}"
 BACKEND_HOST="127.0.0.1:${BACKEND_PORT}"
@@ -20,6 +21,11 @@ fi
 
 if ! [[ "${KEEP_ALIVE_HOURS}" =~ ^[0-9]+$ ]] || ((KEEP_ALIVE_HOURS < 1)); then
   echo "keep-alive hours must be a positive integer" >&2
+  exit 1
+fi
+
+if ! [[ "${NUM_BATCH}" =~ ^[0-9]+$ ]] || ((NUM_BATCH < 1)); then
+  echo "num_batch must be a positive integer" >&2
   exit 1
 fi
 
@@ -93,10 +99,12 @@ model_status() {
 }
 
 start_logging_proxy() {
-  OLLAMA_PROXY_LISTEN="${HOST}" OLLAMA_PROXY_UPSTREAM="${BACKEND_HOST}" python3 -u <<'PY' &
+  OLLAMA_PROXY_LISTEN="${HOST}" OLLAMA_PROXY_UPSTREAM="${BACKEND_HOST}" \
+  OLLAMA_NUM_BATCH="${NUM_BATCH}" python3 -u <<'PY' &
 import datetime
 import http.client
 import itertools
+import json
 import os
 import sys
 import time
@@ -147,6 +155,29 @@ def body_to_text(body: bytes) -> str:
     return body.decode("utf-8", errors="replace")
 
 
+def apply_num_batch(body: bytes) -> bytes:
+    raw_num_batch = os.environ.get("OLLAMA_NUM_BATCH", "").strip()
+    if not raw_num_batch or not body:
+        return body
+    try:
+        num_batch = int(raw_num_batch)
+        payload = json.loads(body)
+    except (ValueError, json.JSONDecodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    options = payload.get("options")
+    if options is None:
+        options = {}
+        payload["options"] = options
+    if not isinstance(options, dict):
+        return body
+    if options.get("num_batch") == num_batch:
+        return body
+    options["num_batch"] = num_batch
+    return json.dumps(payload, ensure_ascii=False).encode()
+
+
 class LoggingProxy(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -168,7 +199,7 @@ class LoggingProxy(BaseHTTPRequestHandler):
     def proxy_request(self):
         request_id = next(request_ids)
         started_at = time.monotonic()
-        request_body = self.read_request_body()
+        request_body = apply_num_batch(self.read_request_body())
         self.log_request_detail(request_id, request_body)
 
         connection = http.client.HTTPConnection(upstream_host, upstream_port, timeout=None)
@@ -177,7 +208,7 @@ class LoggingProxy(BaseHTTPRequestHandler):
                 self.command,
                 self.path,
                 body=request_body if request_body else None,
-                headers=self.upstream_headers(),
+                headers=self.upstream_headers(request_body),
             )
             response = connection.getresponse()
             self.forward_response(request_id, response, started_at)
@@ -193,13 +224,15 @@ class LoggingProxy(BaseHTTPRequestHandler):
             return b""
         return self.rfile.read(content_length)
 
-    def upstream_headers(self) -> dict[str, str]:
+    def upstream_headers(self, body: bytes) -> dict[str, str]:
         headers = {}
         for name, value in self.headers.items():
             if name.lower() in HOP_BY_HOP_HEADERS:
                 continue
             headers[name] = value
         headers["Host"] = f"{upstream_host}:{upstream_port}"
+        if body:
+            headers["Content-Length"] = str(len(body))
         return headers
 
     def log_request_detail(self, request_id: int, request_body: bytes) -> None:
@@ -264,6 +297,7 @@ echo "  endpoint:   http://${HOST}"
 echo "  upstream:   http://${BACKEND_HOST}"
 echo "  model:      ${MODEL}"
 echo "  keep_alive: ${KEEP_ALIVE_HOURS}h"
+echo "  num_batch:  ${NUM_BATCH}"
 echo "  status:     every ${STATUS_INTERVAL_SECONDS}s"
 echo "  stop:       Ctrl+C"
 
